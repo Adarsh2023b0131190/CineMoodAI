@@ -63,20 +63,15 @@ The trainer uses the same ordered MovieLens-plus-Bollywood catalog as the servic
 
 Do not commit the generated model bundle or source datasets to Git. The model is sparse, but loading both matrices currently requires roughly 400 MB for their uncompressed arrays, in addition to Python, SciPy, catalog, and TF-IDF memory. Benchmark peak memory on the target host before selecting an instance size.
 
-## Production deployment configuration
+## Zero-budget deployment configuration
 
-The root [`render.yaml`](render.yaml) defines the ML and Express services. The ML service uses a 2 GB instance and a 1 GB persistent disk because measured local model startup peaked around 616 MiB. It downloads a checksummed, private model bundle to the disk at startup; it does not need `ratings.csv` for inference. Build the bundle offline with:
+The deployment must not use a paid Render plan or persistent disk. [`render.yaml`](render.yaml) therefore contains only the stateless Express API on Render Free; it takes `ML_SERVICE_URL` and `ML_SERVICE_TOKEN` as dashboard variables. Render Free sleeps after 15 minutes without requests and has no persistent disk, so it is unsuitable for the ML model.
 
-```powershell
-cd ml-service
-..\.venv\Scripts\python.exe -m app.package_model_bundle --data-dir .. --artifact-dir artifacts/collaborative-v1 --output ..\.deployment-data\cinemood-ml-bundle.zip
-```
+The ML service requires about 616 MiB at startup and roughly 400 MiB for expanded sparse arrays. The viable always-free compute candidate is an Oracle Cloud Always Free Ampere A1 VM (current allowance: 2 OCPUs, 12 GB RAM); availability is not guaranteed and OCI may reclaim idle instances. OCI signup requires card details and may place a temporary verification hold. Do not start signup unless that requirement is acceptable. The model bundle can be stored in OCI's included Always Free object storage, outside GitHub.
 
-Upload that ZIP to private HTTPS object storage (not GitHub), then configure its access-controlled download URL and printed SHA-256 as `CINEMOOD_DATA_BUNDLE_URL` and `CINEMOOD_DATA_BUNDLE_SHA256` in Render. Configure `MONGODB_URI` with the MongoDB Atlas application user, `TMDB_API_KEY` or `TMDB_ACCESS_TOKEN`, and the exact Vercel production origin in Render. These secret values belong in provider dashboards only.
+Install the ML API on an eligible Ubuntu A1 host using [`deploy/oci/install-ml.sh`](deploy/oci/install-ml.sh) and [`deploy/oci/cinemood-ml.service`](deploy/oci/cinemood-ml.service). Keep the bundle URL, SHA-256 and `ML_SERVICE_TOKEN` in `/etc/cinemood/ml.env` (mode 0600). Configure Caddy from [`deploy/oci/Caddyfile.template`](deploy/oci/Caddyfile.template) with the VM's TLS-enabled hostname; it exposes the ML API under `/ml/*` while Uvicorn listens on loopback. The original `ratings.csv` is not needed by inference.
 
-For Vercel, set the frontend root directory to `frontend/` and set `BACKEND_API_URL` to the deployed Express service's HTTPS origin. [`frontend/vercel.ts`](frontend/vercel.ts) routes `/api/*` through Vercel to Express so the browser uses same-origin HttpOnly session cookies. Set `FRONTEND_ORIGIN` in Render to the resulting Vercel origin. Local Vite development proxies `/api` to `http://localhost:5000`; override with `VITE_DEV_API_TARGET` if needed.
-
-The ML 2 GB service and persistent disk require a paid Render workspace. The repository configuration does not itself create or deploy paid resources. Complete provider authorization and billing setup before applying the Blueprint. Deploy the ML service first so its bundle URL and health check can be verified, then deploy Express, configure the Vercel API origin and deploy the frontend. Test the public URLs and account flows after adding Atlas network access for Render.
+For Vercel Hobby, configure the frontend root as `frontend/` and set `BACKEND_API_URL` to the Render API HTTPS origin. Vercel proxies `/api/*` to Express, preserving same-origin HttpOnly cookies. Set Render's `FRONTEND_ORIGIN`, `MONGODB_URI`, `ML_SERVICE_URL` (the OCI HTTPS hostname plus `/ml`), and the same `ML_SERVICE_TOKEN` used on OCI. Keep all credentials in provider dashboards or the VM's protected environment file. MongoDB Atlas Free clusters provide 512 MB, which is suitable for a small CineMood account/rating dataset but not large-scale growth.
 
 ## Recommendation endpoints
 

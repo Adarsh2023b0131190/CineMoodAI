@@ -78,10 +78,10 @@ function publicMlError(error, res) {
   return errorResponse(res, 502, 'ML_SERVICE_UNAVAILABLE', 'The recommendation service is unavailable');
 }
 
-export function createApp({ mlServiceUrl = DEFAULT_ML_URL, mlTimeoutMs = 10_000, frontendOrigin = process.env.FRONTEND_ORIGIN || 'http://localhost:5173', models = {}, tmdbApiKey = process.env.TMDB_API_KEY || '', tmdbAccessToken = process.env.TMDB_ACCESS_TOKEN || '', tmdbBaseUrl = 'https://api.themoviedb.org/3', tmdbTimeoutMs = 6000, sessionCookieSameSite = process.env.SESSION_COOKIE_SAME_SITE || (process.env.NODE_ENV === 'production' ? 'None' : 'Strict') } = {}) {
+export function createApp({ mlServiceUrl = DEFAULT_ML_URL, mlServiceToken = process.env.ML_SERVICE_TOKEN || '', mlTimeoutMs = 10_000, frontendOrigin = process.env.FRONTEND_ORIGIN || 'http://localhost:5173', models = {}, tmdbApiKey = process.env.TMDB_API_KEY || '', tmdbAccessToken = process.env.TMDB_ACCESS_TOKEN || '', tmdbBaseUrl = 'https://api.themoviedb.org/3', tmdbTimeoutMs = 6000, sessionCookieSameSite = process.env.SESSION_COOKIE_SAME_SITE || (process.env.NODE_ENV === 'production' ? 'None' : 'Strict') } = {}) {
   const app = express();
   const normalizedMlServiceUrl = /^[a-z][a-z\d+.-]*:\/\//i.test(mlServiceUrl) ? mlServiceUrl : `http://${mlServiceUrl}`;
-  const mlClient = axios.create({ baseURL: normalizedMlServiceUrl.replace(/\/$/, ''), timeout: mlTimeoutMs, headers: { Accept: 'application/json' } });
+  const mlClient = axios.create({ baseURL: normalizedMlServiceUrl.replace(/\/$/, ''), timeout: mlTimeoutMs, headers: { Accept: 'application/json', ...(mlServiceToken ? { 'x-ml-service-token': mlServiceToken } : {}) } });
   const tmdbClient = axios.create({
     baseURL: tmdbBaseUrl,
     timeout: tmdbTimeoutMs,

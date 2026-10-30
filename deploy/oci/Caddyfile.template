@@ -1,0 +1,9 @@
+{$CINEMOOD_HOST} {
+	encode zstd gzip
+	handle_path /ml/* {
+		reverse_proxy 127.0.0.1:8000
+	}
+	handle {
+		respond "Not found" 404
+	}
+}

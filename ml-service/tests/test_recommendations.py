@@ -116,6 +116,17 @@ def test_fastapi_response_shape_validation_and_not_found(catalog_file):
         assert client.post("/recommendations/similar", json={"movieId": 999}).status_code == 404
 
 
+def test_service_token_protects_catalog_and_recommendations_but_keeps_health_public(catalog_file):
+    app = create_app(data_dir=catalog_file, service_token="test-internal-token")
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 200
+        assert client.get("/movies").status_code == 401
+        assert client.post("/recommendations/mood", json={"mood": "happy"}).status_code == 401
+        headers = {"x-ml-service-token": "test-internal-token"}
+        assert client.get("/movies", headers=headers).status_code == 200
+        assert client.post("/recommendations/mood", json={"mood": "happy"}, headers=headers).status_code == 200
+
+
 def test_movies_without_feature_metadata_are_not_used_as_recommendations(catalog):
     result = ContentRecommender(catalog).recommend_mood(
         Mood.HAPPY,

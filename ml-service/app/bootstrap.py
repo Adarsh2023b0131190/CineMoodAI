@@ -124,7 +124,7 @@ def main() -> None:
     os.environ["DATA_DIR"] = str(data_dir)
     os.environ["COLLABORATIVE_ARTIFACT_DIR"] = str(data_dir / "collaborative-v1")
     print("CineMood ML data bundle is ready; starting FastAPI.", flush=True)
-    os.execv(sys.executable, [sys.executable, "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", os.getenv("PORT", "10000")])
+    os.execv(sys.executable, [sys.executable, "-m", "uvicorn", "app.main:app", "--host", os.getenv("HOST", "0.0.0.0"), "--port", os.getenv("PORT", "10000")])
 
 
 if __name__ == "__main__":

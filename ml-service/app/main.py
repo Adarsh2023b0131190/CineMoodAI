@@ -1,5 +1,6 @@
 import os
 import logging
+import hmac
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -37,6 +38,7 @@ def create_app(
     catalog: MovieCatalog | None = None,
     collaborative: CollaborativeRecommender | None = None,
     collaborative_artifact_dir: str | Path | None = None,
+    service_token: str | None = None,
 ) -> FastAPI:
     model_lock = threading.Lock()
 
@@ -98,6 +100,15 @@ def create_app(
         return target_app.state.collaborative_model
 
     app = FastAPI(title="CineMood ML Service", version="0.2.0", lifespan=lifespan)
+    configured_service_token = service_token if service_token is not None else os.getenv("ML_SERVICE_TOKEN", "")
+
+    @app.middleware("http")
+    async def require_service_token(request: Request, call_next):
+        if configured_service_token and request.url.path != "/health":
+            supplied = request.headers.get("x-ml-service-token", "")
+            if not hmac.compare_digest(supplied, configured_service_token):
+                return JSONResponse(status_code=401, content={"error": {"code": "SERVICE_AUTH_REQUIRED", "message": "A valid service credential is required."}})
+        return await call_next(request)
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_request: Request, exc: RequestValidationError):

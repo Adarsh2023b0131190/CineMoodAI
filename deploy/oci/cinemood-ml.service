@@ -1,0 +1,25 @@
+[Unit]
+Description=CineMood FastAPI recommendation service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cinemood
+Group=cinemood
+WorkingDirectory=/opt/cinemood/repo/ml-service
+EnvironmentFile=/etc/cinemood/ml.env
+Environment=DATA_DIR=/var/lib/cinemood
+Environment=PORT=8000
+Environment=HOST=127.0.0.1
+ExecStart=/opt/cinemood/venv/bin/python -m app.bootstrap
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/cinemood
+
+[Install]
+WantedBy=multi-user.target

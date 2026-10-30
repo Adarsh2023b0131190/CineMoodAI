@@ -4,13 +4,13 @@ import { once } from 'node:events';
 import test from 'node:test';
 import { createApp } from '../src/app.js';
 
-async function withServers(handler) {
+async function withServers(handler, appOptions = {}) {
   const received = [];
   const mlServer = createServer(async (req, res) => {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
     const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString()) : null;
-    received.push({ method: req.method, url: req.url, body });
+    received.push({ method: req.method, url: req.url, body, headers: req.headers });
     if (req.url === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
       return res.end(JSON.stringify({ status: 'ok', service: 'cinemood-ml' }));
@@ -45,7 +45,7 @@ async function withServers(handler) {
   mlServer.listen(0, '127.0.0.1');
   await once(mlServer, 'listening');
   const mlPort = mlServer.address().port;
-  const apiServer = createApp({ mlServiceUrl: `http://127.0.0.1:${mlPort}` }).listen(0, '127.0.0.1');
+  const apiServer = createApp({ mlServiceUrl: `http://127.0.0.1:${mlPort}`, ...appOptions }).listen(0, '127.0.0.1');
   await once(apiServer, 'listening');
   try {
     await handler(`http://127.0.0.1:${apiServer.address().port}`, received);
@@ -63,6 +63,20 @@ test('proxies movie list using bounded query parameters and preserves the respon
     assert.deepEqual((await response.json()).data.items[0], { movieId: 1, title: 'Sample', genres: ['Comedy'], year: 2000 });
     assert.equal(received.at(-1).url, '/movies?limit=2&offset=0');
   });
+});
+
+test('sends the configured internal ML credential without returning it to the browser', async () => {
+  const secret = 'unit-test-internal-token-value';
+  await withServers(async (baseUrl, received) => {
+    const response = await fetch(`${baseUrl}/api/recommendations/mood`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mood: 'happy', limit: 1 }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(received.at(-1).headers['x-ml-service-token'], secret);
+    assert.equal(JSON.stringify(await response.json()).includes(secret), false);
+  }, { mlServiceToken: secret });
 });
 
 test('validates and proxies mood requests', async () => {
