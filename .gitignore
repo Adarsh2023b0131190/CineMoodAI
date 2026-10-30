@@ -1,0 +1,22 @@
+node_modules/
+**/node_modules/
+**/.venv/
+**/__pycache__/
+*.py[cod]
+.env
+**/.env
+dist/
+.pytest_cache/
+.ruff_cache/
+*.log
+# Source datasets are local inputs and should not be committed.
+/movies.csv
+/ratings.csv
+/BollywoodMovieDetail.csv
+/BollywoodActorRanking.csv
+/BollywoodDirectorRanking.csv
+ml-service/artifacts/
+*.pdf
+*.csv
+test.pdf
+make_code_pdf.py
