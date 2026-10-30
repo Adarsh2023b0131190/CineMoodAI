@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import csv
+import hashlib
 import tempfile
 from pathlib import Path
 
@@ -18,6 +19,10 @@ logger = logging.getLogger("cinemood.ml.collaborative")
 MIN_CO_RATERS = 3
 MIN_ITEM_RATINGS = 3
 SHRINKAGE = 10.0
+ARTIFACT_FORMAT = "cinemood-collaborative"
+ARTIFACT_VERSION = 1
+ALGORITHM_VERSION = "user-mean-centered-item-cosine-v1"
+ARTIFACT_FILES = ("centered-items.npz", "interaction-items.npz", "collaborative-matrices.npz")
 
 
 class CollaborativeRecommender:
@@ -45,6 +50,12 @@ class CollaborativeRecommender:
     def from_csv(cls, path: str | Path, catalog: MovieCatalog, artifact_dir: str | Path | None = None):
         """Build sparse matrices in chunks; cache them on disk when a directory is supplied."""
         csv_path = Path(path)
+        if artifact_dir:
+            configured_artifacts = Path(artifact_dir)
+            production_candidates = (configured_artifacts, configured_artifacts / "collaborative-v1")
+            for candidate in production_candidates:
+                if (candidate / "manifest.json").is_file():
+                    return cls.from_artifacts(candidate, catalog)
         if not csv_path.exists():
             raise FileNotFoundError(f"Ratings dataset not found: {csv_path}")
 
@@ -71,6 +82,136 @@ class CollaborativeRecommender:
         if artifact_dir:
             model._save(Path(artifact_dir), csv_path)
         return model
+
+    @staticmethod
+    def _catalog_ids_digest(catalog: MovieCatalog) -> str:
+        ordered_ids = np.asarray([movie.movie_id for movie in catalog.movies], dtype="<i8")
+        return hashlib.sha256(ordered_ids.tobytes(order="C")).hexdigest()
+
+    @staticmethod
+    def _file_digest(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @classmethod
+    def from_artifacts(cls, artifact_dir: str | Path, catalog: MovieCatalog):
+        """Load a versioned production model without opening ratings.csv."""
+        artifact = Path(artifact_dir)
+        manifest_path = artifact / "manifest.json"
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"Collaborative model manifest is missing: {manifest_path}")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Collaborative model manifest is unreadable or invalid JSON") from exc
+
+        if not isinstance(manifest, dict) or manifest.get("format") != ARTIFACT_FORMAT:
+            raise ValueError("Collaborative model artifact format is not recognized")
+        if manifest.get("artifactVersion") != ARTIFACT_VERSION:
+            raise ValueError(f"Unsupported collaborative artifact version: {manifest.get('artifactVersion')}")
+        if manifest.get("algorithmVersion") != ALGORITHM_VERSION:
+            raise ValueError("Collaborative artifact algorithm version is incompatible")
+        expected_parameters = {"minCoRaters": MIN_CO_RATERS, "minItemRatings": MIN_ITEM_RATINGS, "shrinkage": SHRINKAGE}
+        if manifest.get("parameters") != expected_parameters:
+            raise ValueError("Collaborative artifact parameters do not match this service version")
+
+        catalog_meta = manifest.get("catalog")
+        if not isinstance(catalog_meta, dict) or catalog_meta.get("movieCount") != len(catalog.movies):
+            raise ValueError("Collaborative artifact movie count does not match the loaded catalog")
+        if catalog_meta.get("orderedMovieIdsSha256") != cls._catalog_ids_digest(catalog):
+            raise ValueError("Collaborative artifact movie ID ordering does not match the loaded catalog")
+
+        file_metadata = manifest.get("files")
+        if not isinstance(file_metadata, dict) or set(file_metadata) != set(ARTIFACT_FILES):
+            raise ValueError("Collaborative artifact manifest has an incomplete file list")
+        for filename in ARTIFACT_FILES:
+            file_path = artifact / filename
+            entry = file_metadata.get(filename)
+            if not isinstance(entry, dict) or not file_path.is_file():
+                raise ValueError(f"Collaborative artifact file is missing: {filename}")
+            if file_path.stat().st_size != entry.get("bytes"):
+                raise ValueError(f"Collaborative artifact file size check failed: {filename}")
+            if cls._file_digest(file_path) != entry.get("sha256"):
+                raise ValueError(f"Collaborative artifact checksum failed: {filename}")
+
+        model_meta = manifest.get("model")
+        if not isinstance(model_meta, dict):
+            raise ValueError("Collaborative artifact model metadata is missing")
+        try:
+            expected_shape = tuple(int(value) for value in model_meta["matrixShape"])
+            duplicate_pairs = int(model_meta["duplicatePairsAveraged"])
+            invalid_rows = int(model_meta["invalidRowsSkipped"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("Collaborative artifact model metadata is invalid") from exc
+        if len(expected_shape) != 2 or expected_shape[0] != len(catalog.movies) or min(expected_shape) < 1:
+            raise ValueError("Collaborative artifact matrix dimensions are incompatible with the catalog")
+
+        try:
+            centered = load_npz(artifact / "centered-items.npz")
+            interactions = load_npz(artifact / "interaction-items.npz")
+            with np.load(artifact / "collaborative-matrices.npz", allow_pickle=False) as matrices:
+                norms = matrices["norms"].copy()
+                counts = matrices["counts"].copy()
+        except (OSError, ValueError, KeyError, EOFError) as exc:
+            raise ValueError("Collaborative matrix artifact is corrupted or unreadable") from exc
+
+        if centered.format != "csr" or interactions.format != "csr":
+            raise ValueError("Collaborative matrices must use CSR storage")
+        if tuple(centered.shape) != expected_shape or tuple(interactions.shape) != expected_shape:
+            raise ValueError("Collaborative matrix dimensions do not match the manifest")
+        if centered.nnz != model_meta.get("matrixNnz") or interactions.nnz != model_meta.get("matrixNnz"):
+            raise ValueError("Collaborative matrix entry counts do not match the manifest")
+        if centered.data.dtype != np.float32 or interactions.data.dtype != np.int32:
+            raise ValueError("Collaborative matrix data types are incompatible")
+        if norms.shape != (expected_shape[0],) or counts.shape != (expected_shape[0],):
+            raise ValueError("Collaborative per-movie statistics have incompatible dimensions")
+        if not np.isfinite(norms).all() or (norms < 0).any() or (counts < 0).any():
+            raise ValueError("Collaborative per-movie statistics contain invalid values")
+
+        model = cls(catalog, centered, interactions, norms, counts, duplicate_pairs, invalid_rows)
+        if model.stats["users"] != expected_shape[1] or model.stats["ratings"] != model_meta.get("matrixNnz"):
+            raise ValueError("Collaborative model statistics do not match the manifest")
+        logger.info("Loaded production collaborative model artifact: %s", model.stats)
+        return model
+
+    def save_production_artifacts(self, artifact_dir: str | Path):
+        """Write a verified, immutable artifact bundle; never overwrite a prior bundle."""
+        destination = Path(artifact_dir).resolve()
+        if destination.exists():
+            raise FileExistsError(f"Refusing to overwrite existing collaborative artifacts: {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=f".{destination.name}.staging-", dir=destination.parent) as staging_name:
+            staging = Path(staging_name)
+            save_npz(staging / "centered-items.npz", self.centered_items, compressed=True)
+            save_npz(staging / "interaction-items.npz", self.interactions_items, compressed=True)
+            np.savez_compressed(staging / "collaborative-matrices.npz", norms=self.item_norms, counts=self.item_rating_counts)
+            files = {
+                filename: {"bytes": (staging / filename).stat().st_size, "sha256": self._file_digest(staging / filename)}
+                for filename in ARTIFACT_FILES
+            }
+            manifest = {
+                "format": ARTIFACT_FORMAT,
+                "artifactVersion": ARTIFACT_VERSION,
+                "algorithmVersion": ALGORITHM_VERSION,
+                "parameters": {"minCoRaters": MIN_CO_RATERS, "minItemRatings": MIN_ITEM_RATINGS, "shrinkage": SHRINKAGE},
+                "catalog": {
+                    "movieCount": len(self.catalog.movies),
+                    "orderedMovieIdsSha256": self._catalog_ids_digest(self.catalog),
+                },
+                "model": {
+                    "matrixShape": list(self.centered_items.shape),
+                    "matrixNnz": int(self.interactions_items.nnz),
+                    "duplicatePairsAveraged": self.duplicate_pairs,
+                    "invalidRowsSkipped": self.invalid_rows,
+                },
+                "files": files,
+            }
+            (staging / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+            os.rename(staging, destination)
+        return destination
 
     @staticmethod
     def _signature(csv_path: Path, catalog: MovieCatalog) -> dict:

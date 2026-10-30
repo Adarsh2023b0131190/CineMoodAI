@@ -78,9 +78,10 @@ function publicMlError(error, res) {
   return errorResponse(res, 502, 'ML_SERVICE_UNAVAILABLE', 'The recommendation service is unavailable');
 }
 
-export function createApp({ mlServiceUrl = DEFAULT_ML_URL, mlTimeoutMs = 10_000, frontendOrigin = process.env.FRONTEND_ORIGIN || 'http://localhost:5173', models = {}, tmdbApiKey = process.env.TMDB_API_KEY || '', tmdbAccessToken = process.env.TMDB_ACCESS_TOKEN || '', tmdbBaseUrl = 'https://api.themoviedb.org/3', tmdbTimeoutMs = 6000 } = {}) {
+export function createApp({ mlServiceUrl = DEFAULT_ML_URL, mlTimeoutMs = 10_000, frontendOrigin = process.env.FRONTEND_ORIGIN || 'http://localhost:5173', models = {}, tmdbApiKey = process.env.TMDB_API_KEY || '', tmdbAccessToken = process.env.TMDB_ACCESS_TOKEN || '', tmdbBaseUrl = 'https://api.themoviedb.org/3', tmdbTimeoutMs = 6000, sessionCookieSameSite = process.env.SESSION_COOKIE_SAME_SITE || (process.env.NODE_ENV === 'production' ? 'None' : 'Strict') } = {}) {
   const app = express();
-  const mlClient = axios.create({ baseURL: mlServiceUrl.replace(/\/$/, ''), timeout: mlTimeoutMs, headers: { Accept: 'application/json' } });
+  const normalizedMlServiceUrl = /^[a-z][a-z\d+.-]*:\/\//i.test(mlServiceUrl) ? mlServiceUrl : `http://${mlServiceUrl}`;
+  const mlClient = axios.create({ baseURL: normalizedMlServiceUrl.replace(/\/$/, ''), timeout: mlTimeoutMs, headers: { Accept: 'application/json' } });
   const tmdbClient = axios.create({
     baseURL: tmdbBaseUrl,
     timeout: tmdbTimeoutMs,
@@ -108,7 +109,7 @@ export function createApp({ mlServiceUrl = DEFAULT_ML_URL, mlTimeoutMs = 10_000,
   };
   const allowedOrigins = new Set(String(frontendOrigin).split(',').map(origin => origin.trim()).filter(Boolean));
   const { User: UserModel = User, MovieRating: RatingModel = MovieRating, Session: SessionModel = Session } = models;
-  const auth = createAuth({ UserModel, SessionModel });
+  const auth = createAuth({ UserModel, SessionModel, cookieSameSite: sessionCookieSameSite });
   for (const origin of [...allowedOrigins]) {
     try {
       const parsed = new URL(origin);

@@ -1,4 +1,6 @@
 import csv
+import json
+import sys
 
 import pytest
 from fastapi.testclient import TestClient
@@ -7,6 +9,7 @@ from app.main import create_app
 from app.services.catalog import MovieCatalog
 from app.services.collaborative import CollaborativeRecommender
 from app.services.recommender import ContentRecommender
+from app.train_collaborative import main as train_collaborative
 
 
 @pytest.fixture
@@ -68,6 +71,97 @@ def test_cached_sparse_model_reloads_with_identical_recommendations(project_data
     cached = CollaborativeRecommender.from_csv(project_data / "ratings.csv", catalog, artifact_dir=artifacts)
     profile = [{"movieId": 1, "rating": 5}]
     assert built.recommend(profile, 5) == cached.recommend(profile, 5)
+
+
+def test_production_artifact_loads_without_ratings_csv_and_preserves_movie_ids(project_data):
+    bollywood_path = project_data / "BollywoodMovieDetail.csv"
+    with bollywood_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["imdbId", "title", "releaseYear", "genre"])
+        writer.writeheader()
+        writer.writerow({"imdbId": "tt0123456", "title": "Bollywood Catalog Test", "releaseYear": "2001", "genre": "Drama"})
+    catalog = MovieCatalog.from_csv(project_data / "movies.csv", bollywood_path)
+    built = CollaborativeRecommender.from_csv(project_data / "ratings.csv", catalog)
+    profile = [{"movieId": 1, "rating": 5}]
+    built_cf = built.recommend(profile, 5)
+    content = ContentRecommender(catalog)
+    built_hybrid = built.recommend_hybrid(profile, content, 5, content_weight=0.7)
+    bundle = project_data / "bundles" / "collaborative-v1"
+    built.save_production_artifacts(bundle)
+
+    (project_data / "ratings.csv").unlink()
+    loaded = CollaborativeRecommender.from_artifacts(bundle, catalog)
+    assert loaded.recommend(profile, 5) == built_cf
+    assert loaded.recommend_hybrid(profile, content, 5, content_weight=0.7) == built_hybrid
+    assert [movie.movie_id for movie in loaded.catalog.movies] == [movie.movie_id for movie in catalog.movies]
+    assert loaded.catalog.movies[-1].movie_id == 1_000_123_456
+
+    app = create_app(data_dir=project_data, collaborative_artifact_dir=bundle)
+    with TestClient(app) as client:
+        assert client.get("/health").json()["collaborative"] == "loaded"
+        collaborative = client.post("/recommendations/collaborative", json={"ratings": profile, "limit": 5})
+        hybrid = client.post("/recommendations/hybrid", json={"ratings": profile, "contentWeight": 0.7, "limit": 5})
+        assert collaborative.status_code == 200
+        assert collaborative.json()["data"]["items"][0]["movieId"] == 2
+        assert hybrid.status_code == 200
+        assert hybrid.json()["data"]["method"] == "hybrid/content+collaborative"
+
+
+def test_production_artifact_rejects_missing_corrupt_and_incompatible_bundles(project_data):
+    catalog = MovieCatalog.from_csv(project_data / "movies.csv")
+    model = CollaborativeRecommender.from_csv(project_data / "ratings.csv", catalog)
+    bundle = project_data / "production-artifact"
+
+    with pytest.raises(FileNotFoundError, match="manifest is missing"):
+        CollaborativeRecommender.from_artifacts(bundle, catalog)
+    with pytest.raises(RuntimeError, match="Could not load configured collaborative artifact.*manifest is missing"):
+        with TestClient(create_app(data_dir=project_data, collaborative_artifact_dir=bundle)):
+            pass
+
+    model.save_production_artifacts(bundle)
+    corrupted = bundle / "centered-items.npz"
+    with corrupted.open("ab") as stream:
+        stream.write(b"corrupt")
+    with pytest.raises(ValueError, match="size check failed"):
+        CollaborativeRecommender.from_artifacts(bundle, catalog)
+
+    # Rebuild into a distinct directory; bundles are immutable and never overwritten.
+    compatible_bundle = project_data / "production-artifact-compatible"
+    model.save_production_artifacts(compatible_bundle)
+    reordered_catalog = MovieCatalog(list(reversed(catalog.movies)))
+    with pytest.raises(ValueError, match="movie ID ordering"):
+        CollaborativeRecommender.from_artifacts(compatible_bundle, reordered_catalog)
+
+
+def test_production_artifact_refuses_to_overwrite_existing_directory(project_data):
+    catalog = MovieCatalog.from_csv(project_data / "movies.csv")
+    model = CollaborativeRecommender.from_csv(project_data / "ratings.csv", catalog)
+    destination = project_data / "immutable-bundle"
+    destination.mkdir()
+    (destination / "keep.txt").write_text("keep", encoding="utf-8")
+    with pytest.raises(FileExistsError, match="Refusing to overwrite"):
+        model.save_production_artifacts(destination)
+    assert (destination / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+
+def test_offline_training_command_builds_matching_bollywood_catalog_bundle(project_data, monkeypatch):
+    bollywood_path = project_data / "BollywoodMovieDetail.csv"
+    with bollywood_path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["imdbId", "title", "releaseYear", "genre"])
+        writer.writeheader()
+        writer.writerow({"imdbId": "tt0123456", "title": "Bollywood Catalog Test", "releaseYear": "2001", "genre": "Drama"})
+    output = project_data / "offline-output" / "collaborative-v1"
+    monkeypatch.setattr(sys, "argv", ["train_collaborative", "--data-dir", str(project_data), "--output-dir", str(output)])
+
+    train_collaborative()
+    catalog = MovieCatalog.from_csv(project_data / "movies.csv", bollywood_path)
+    loaded = CollaborativeRecommender.from_artifacts(output, catalog)
+    assert loaded.catalog.movies[-1].movie_id == 1_000_123_456
+
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    manifest["artifactVersion"] += 1
+    (output / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="Unsupported collaborative artifact version"):
+        CollaborativeRecommender.from_artifacts(output, catalog)
 
 
 def test_empty_ratings_dataset_is_rejected_without_creating_scores(project_data):

@@ -13,7 +13,7 @@ The MovieLens files do not contain plot summaries, language, runtime, mood label
 ## Current implementation
 
 - Architecture: [`docs/architecture.md`](docs/architecture.md).
-- FastAPI loads the movie catalog at service startup and caches a sparse TF-IDF matrix. The collaborative model is prepared lazily on its first request and saved under `ml-service/artifacts/` for later runs.
+- FastAPI loads the movie catalog at service startup and caches a sparse TF-IDF matrix. Collaborative filtering can use a versioned production artifact bundle loaded once at startup, without `ratings.csv`; local development retains the legacy CSV-backed cache fallback.
 - Express proxies catalog and recommendation endpoints to FastAPI.
 - The homepage submits mood selections and natural-language requests, supports account registration/login/logout, restores signed-in sessions, and saves account ratings to MongoDB. Signed-out visitors can still keep a local-only rating profile.
 - Still not implemented: verified film metadata enrichment, deployment.
@@ -36,7 +36,7 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 Copy-Item .env.example .env
-# Optional first-time model build (otherwise the first collaborative request builds it)
+# Optional offline build: prepare production collaborative artifacts before service startup
 python -m app.train_collaborative
 python -m uvicorn app.main:app --reload --port 8000
 
@@ -48,6 +48,35 @@ npm run dev
 ```
 
 The frontend runs at `http://localhost:5173`, Express at `http://localhost:5000`, and FastAPI at `http://localhost:8000`. The ML service defaults to the repository root for `movies.csv`; when running from `ml-service/`, `DATA_DIR=..` in `.env` resolves to that root. Express reports ML connectivity and catalog statistics via `GET /api/health`.
+
+### Offline collaborative artifact build
+
+For production builds, create a standalone, versioned model bundle on a machine that has the source datasets. From the repository root:
+
+```powershell
+cd ml-service
+.\.venv\Scripts\Activate.ps1
+python -m app.train_collaborative --data-dir .. --output-dir artifacts/collaborative-v1
+```
+
+The trainer uses the same ordered MovieLens-plus-Bollywood catalog as the service, and refuses to overwrite an existing output directory. The bundle contains checksummed sparse matrices and a manifest with the artifact/algorithm versions, ordered movie-ID fingerprint, dimensions, and training statistics. Copy the bundle through private artifact storage to the ML service and set `COLLABORATIVE_ARTIFACT_DIR` to its directory. When this variable is set, FastAPI validates and loads the model at startup; missing or incompatible artifacts fail startup with a clear error. Collaborative and hybrid inference then use the loaded matrices without opening `ratings.csv`. The service still needs `movies.csv` and, when Bollywood catalog support is enabled, `BollywoodMovieDetail.csv` for catalog loading and ID-order validation.
+
+Do not commit the generated model bundle or source datasets to Git. The model is sparse, but loading both matrices currently requires roughly 400 MB for their uncompressed arrays, in addition to Python, SciPy, catalog, and TF-IDF memory. Benchmark peak memory on the target host before selecting an instance size.
+
+## Production deployment configuration
+
+The root [`render.yaml`](render.yaml) defines the ML and Express services. The ML service uses a 2 GB instance and a 1 GB persistent disk because measured local model startup peaked around 616 MiB. It downloads a checksummed, private model bundle to the disk at startup; it does not need `ratings.csv` for inference. Build the bundle offline with:
+
+```powershell
+cd ml-service
+..\.venv\Scripts\python.exe -m app.package_model_bundle --data-dir .. --artifact-dir artifacts/collaborative-v1 --output ..\.deployment-data\cinemood-ml-bundle.zip
+```
+
+Upload that ZIP to private HTTPS object storage (not GitHub), then configure its access-controlled download URL and printed SHA-256 as `CINEMOOD_DATA_BUNDLE_URL` and `CINEMOOD_DATA_BUNDLE_SHA256` in Render. Configure `MONGODB_URI` with the MongoDB Atlas application user, `TMDB_API_KEY` or `TMDB_ACCESS_TOKEN`, and the exact Vercel production origin in Render. These secret values belong in provider dashboards only.
+
+For Vercel, set the frontend root directory to `frontend/` and set `BACKEND_API_URL` to the deployed Express service's HTTPS origin. [`frontend/vercel.ts`](frontend/vercel.ts) routes `/api/*` through Vercel to Express so the browser uses same-origin HttpOnly session cookies. Set `FRONTEND_ORIGIN` in Render to the resulting Vercel origin. Local Vite development proxies `/api` to `http://localhost:5000`; override with `VITE_DEV_API_TARGET` if needed.
+
+The ML 2 GB service and persistent disk require a paid Render workspace. The repository configuration does not itself create or deploy paid resources. Complete provider authorization and billing setup before applying the Blueprint. Deploy the ML service first so its bundle URL and health check can be verified, then deploy Express, configure the Vercel API origin and deploy the frontend. Test the public URLs and account flows after adding Atlas network access for Render.
 
 ## Recommendation endpoints
 

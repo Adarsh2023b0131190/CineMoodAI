@@ -25,11 +25,17 @@ export async function verifyPassword(password, encoded) {
 }
 
 export function cookieName() { return COOKIE; }
-export function sessionCookie(token, production = process.env.NODE_ENV === 'production') {
-  return `${COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Strict; Path=/api; Max-Age=${SESSION_DAYS * 86400}${production ? '; Secure' : ''}`;
+export function sessionCookie(token, production = process.env.NODE_ENV === 'production', sameSite = process.env.SESSION_COOKIE_SAME_SITE || (production ? 'None' : 'Strict')) {
+  const normalizedSameSite = ({ strict: 'Strict', lax: 'Lax', none: 'None' })[String(sameSite).toLowerCase()];
+  if (!normalizedSameSite) throw new Error('SESSION_COOKIE_SAME_SITE must be Strict, Lax, or None');
+  if (normalizedSameSite === 'None' && !production) throw new Error('SameSite=None cookies require production Secure cookies');
+  return `${COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=${normalizedSameSite}; Path=/api; Max-Age=${SESSION_DAYS * 86400}${production ? '; Secure' : ''}`;
 }
-export function clearSessionCookie(production = process.env.NODE_ENV === 'production') {
-  return `${COOKIE}=; HttpOnly; SameSite=Strict; Path=/api; Max-Age=0${production ? '; Secure' : ''}`;
+export function clearSessionCookie(production = process.env.NODE_ENV === 'production', sameSite = process.env.SESSION_COOKIE_SAME_SITE || (production ? 'None' : 'Strict')) {
+  const normalizedSameSite = ({ strict: 'Strict', lax: 'Lax', none: 'None' })[String(sameSite).toLowerCase()];
+  if (!normalizedSameSite) throw new Error('SESSION_COOKIE_SAME_SITE must be Strict, Lax, or None');
+  if (normalizedSameSite === 'None' && !production) throw new Error('SameSite=None cookies require production Secure cookies');
+  return `${COOKIE}=; HttpOnly; SameSite=${normalizedSameSite}; Path=/api; Max-Age=0${production ? '; Secure' : ''}`;
 }
 
 function readCookie(req) {
@@ -38,12 +44,12 @@ function readCookie(req) {
   try { return decodeURIComponent(entry.slice(COOKIE.length + 1)); } catch { return null; }
 }
 
-export function createAuth({ UserModel = User, SessionModel = Session } = {}) {
+export function createAuth({ UserModel = User, SessionModel = Session, cookieSameSite = process.env.SESSION_COOKIE_SAME_SITE || (process.env.NODE_ENV === 'production' ? 'None' : 'Strict') } = {}) {
   async function createSession(userId, res) {
     const token = randomBytes(32).toString('base64url');
     const expiresAt = new Date(Date.now() + SESSION_DAYS * 86400_000);
     await SessionModel.create({ tokenHash: hashToken(token), userId, expiresAt });
-    res.setHeader('Set-Cookie', sessionCookie(token));
+    res.setHeader('Set-Cookie', sessionCookie(token, process.env.NODE_ENV === 'production', cookieSameSite));
   }
 
   async function authenticate(req) {
@@ -88,7 +94,7 @@ export function createAuth({ UserModel = User, SessionModel = Session } = {}) {
       try {
         const token = readCookie(req);
         if (token) await SessionModel.deleteOne({ tokenHash: hashToken(token) });
-        res.setHeader('Set-Cookie', clearSessionCookie());
+        res.setHeader('Set-Cookie', clearSessionCookie(process.env.NODE_ENV === 'production', cookieSameSite));
         return res.json({ data: { loggedOut: true } });
       } catch (error) { return next(error); }
     },

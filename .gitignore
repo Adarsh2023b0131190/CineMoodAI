@@ -16,6 +16,7 @@ dist/
 /BollywoodActorRanking.csv
 /BollywoodDirectorRanking.csv
 ml-service/artifacts/
+.deployment-data/
 *.pdf
 *.csv
 test.pdf

@@ -1,0 +1,55 @@
+services:
+  - type: web
+    name: cinemood-ml
+    runtime: python
+    region: singapore
+    plan: 1c-2g
+    rootDir: ml-service
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.bootstrap
+    healthCheckPath: /health
+    disk:
+      name: cinemood-ml-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: DATA_DIR
+        value: /var/data
+      - key: HYBRID_CONTENT_WEIGHT
+        value: "0.5"
+      - key: CINEMOOD_DATA_BUNDLE_URL
+        sync: false
+      - key: CINEMOOD_DATA_BUNDLE_SHA256
+        sync: false
+
+  - type: web
+    name: cinemood-api
+    runtime: node
+    region: singapore
+    plan: free
+    rootDir: backend
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 22.20.0
+      - key: NODE_ENV
+        value: production
+      - key: SESSION_COOKIE_SAME_SITE
+        value: Strict
+      - key: ML_SERVICE_URL
+        fromService:
+          type: web
+          name: cinemood-ml
+          property: hostport
+      - key: FRONTEND_ORIGIN
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: TMDB_API_KEY
+        sync: false
+      - key: TMDB_ACCESS_TOKEN
+        sync: false

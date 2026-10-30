@@ -36,6 +36,7 @@ def create_app(
     data_dir: str | Path | None = None,
     catalog: MovieCatalog | None = None,
     collaborative: CollaborativeRecommender | None = None,
+    collaborative_artifact_dir: str | Path | None = None,
 ) -> FastAPI:
     model_lock = threading.Lock()
 
@@ -56,6 +57,23 @@ def create_app(
         target_app.state.collaborative_load_failed = False
         configured_artifacts = Path(os.getenv("ARTIFACT_DIR", str(DEFAULT_ARTIFACT_DIR))).expanduser()
         target_app.state.collaborative_artifacts = configured_artifacts if configured_artifacts.is_absolute() else (Path.cwd() / configured_artifacts).resolve()
+        explicit_artifact_dir = collaborative_artifact_dir or os.getenv("COLLABORATIVE_ARTIFACT_DIR")
+        if target_app.state.collaborative_model is None:
+            if explicit_artifact_dir:
+                artifact_path = Path(explicit_artifact_dir).expanduser()
+                if not artifact_path.is_absolute():
+                    artifact_path = (Path.cwd() / artifact_path).resolve()
+                try:
+                    target_app.state.collaborative_model = CollaborativeRecommender.from_artifacts(artifact_path, loaded_catalog)
+                except (OSError, ValueError) as exc:
+                    raise RuntimeError(f"Could not load configured collaborative artifact at {artifact_path}: {exc}") from exc
+            elif data_dir is None:
+                default_production_artifact = target_app.state.collaborative_artifacts / "collaborative-v1"
+                if (default_production_artifact / "manifest.json").is_file():
+                    try:
+                        target_app.state.collaborative_model = CollaborativeRecommender.from_artifacts(default_production_artifact, loaded_catalog)
+                    except (OSError, ValueError) as exc:
+                        raise RuntimeError(f"Could not load collaborative artifact at {default_production_artifact}: {exc}") from exc
         yield
 
     def get_collaborative(target_app: FastAPI) -> CollaborativeRecommender | None:
